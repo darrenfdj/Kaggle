@@ -1,0 +1,142 @@
+library(readr)
+library(tidyr)
+library(dplyr)
+library(magrittr)
+library(stringr)
+library(mice)
+library(caretEnsemble)
+library(caret)
+titanic.train <- read.csv("C:/Users/Darren/Desktop/Titanic/train.csv")
+titanic.test <-  read.csv("C:/Users/Darren/Desktop/Titanic/test.csv")
+
+#Create a new row called IsTrainSet, so that after tidying up the data, I can split them up back to the train
+#and test set.
+titanic.train$IsTrainSet <- TRUE
+titanic.test$IsTrainSet <- FALSE
+
+#I add a new column for titanic.test so that I can rbind both datasets together for cleaning.
+#rbind() dont work if the number of columns of both datasets are not the same. 
+titanic.test$Survived <- NA
+
+#Combine both training and testing set togther so that I can clean them at the same time.
+titanic <- rbind(titanic.train, titanic.test)
+
+attach(titanic)
+
+sapply(titanic.train, function(x) sum(is.na(x))) #Check NA values for each column
+
+Age_median <- median(titanic$Age, na.rm = TRUE)
+
+#I fill the NA values under Age column to the median of Age
+titanic <- titanic %>%
+  mutate(Age = replace_na(Age,Age_median))
+
+Fare.mean <- median(titanic$Fare, na.rm = TRUE)
+
+#I fill the NA values under Fare column to the mean of Fare
+titanic <- titanic %>%
+  mutate(Fare = replace_na(Fare, Fare.mean))
+
+#I use substr() in library(stringr) to extract out the first letter of the word
+titanic <- titanic %>%
+  mutate(Letter_Cabin = substr(Cabin, 1,1))
+
+title_list = c('Mrs', 'Mr','Master', 'Miss', 'Major', 'Rev',
+               'Dr', 'Ms', 'Mlle','Col', 'Capt', 'Mme', 'Countess','Don', 'Jonkheer')
+#I use str_extract in library(stringr) to extract out the strings under Name that contains words in the title_list
+titanic <- titanic %>%
+  mutate(Title = str_extract(Name, paste(title_list, collapse = "|")))
+
+#Replace values containing "" to S
+titanic$Embarked[titanic$Embarked == ""] <- "S" 
+
+#Replace values containing "" to Unknown
+titanic$Letter_Cabin[titanic$Letter_Cabin == ""] <- "Unknown"
+
+#Add the number of Siblings, number of Parents, and individual to get the FamilySize
+titanic$FamilySize <- 1 + titanic$SibSp + titanic$Parch
+
+#Converting classification features into factors
+titanic$Parch <- as.factor(titanic$Parch)
+titanic$Survived <- as.factor(titanic$Survived)
+titanic$Sex <- as.factor(titanic$Sex)
+titanic$FamilySize <- as.factor(titanic$FamilySize)
+titanic$Letter_Cabin <- as.factor(titanic$Letter_Cabin)
+titanic$Pclass <- as.factor(titanic$Pclass)
+titanic$Title <- as.factor(titanic$Title)
+titanic$PassengerId <- as.factor(titanic$PassengerId)
+
+preProcess <- preProcess(titanic, method=c("center", "scale"))
+titanic<- predict(preProcess, newdata = titanic)
+head(titanic)
+
+titanic.train <- titanic[titanic$IsTrainSet == TRUE,]
+titanic.test <- titanic[titanic$IsTrainSet == FALSE,]
+
+features_train <- c("Survived", "Pclass", "Sex", "Age", "FamilySize", "Embarked", "Fare","Title")
+features_test <- c("PassengerId", "Pclass", "Sex", "Age", "FamilySize", "Embarked", "Fare","Title")
+
+titanic.train = titanic.train %>%
+  select(features_train)
+titanic.test = titanic.test %>%
+  select(features_test)
+
+
+set.seed(100)
+split <- createDataPartition(titanic.train$Survived, times = 1, p=0.6, list = FALSE)
+train_titanic <- titanic.train[split,]
+test_titanic <- titanic.train[-split,]
+train.control <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+
+#xgbTree model
+xgbTree_model <- train(Survived~. , data = train_titanic, method = "xgbTree", trControl = train.control)
+pred <- predict(xgbTree_model, test_titanic)
+confusionMatrix(pred, test_titanic$Survived)
+
+#random forest model
+rf_model <- train(Survived~. , data = train_titanic, method = "rf", trControl = train.control)
+pred <- predict(rf_model, test_titanic)
+confusionMatrix(pred, test_titanic$Survived)
+
+#naive_bayes model
+naivebayes_model <- train(Survived~. , data = train_titanic, method = "naive_bayes", trControl = train.control)
+pred <- predict(naivebayes_model, test_titanic)
+confusionMatrix(pred, test_titanic$Survived)
+
+#Regularized Logistic Regression
+regLogistic_model <- train(Survived~. , data = train_titanic, method = "regLogistic", trControl = train.control)
+pred <- predict(regLogistic_model, test_titanic)
+confusionMatrix(pred, test_titanic$Survived)
+
+#SVM
+svm_model <- train(Survived~. , data = train_titanic, method = "svmRadial", trControl = train.control)
+pred <- predict(svm_model, test_titanic)
+confusionMatrix(pred, test_titanic$Survived)
+
+
+models_compare <- resamples(list(XGBDART=xgbDART_model, RF=rf_model, 
+                                 NAIVEBAYES=naivebayes_model, 
+                                 REGLOGISTIC=regLogistic_model, SVM=svm_model))
+
+summary(models_compare)
+
+algorithmlist <- c('xgbTree', 'rf', 'naive_bayes', 'regLogistic', 'svmRadial')
+models <- caretList(Survived~., data=train_titanic, trControl=train.control, methodList=algorithmlist) 
+results <- resamples(models)
+summary(results)
+
+stackControl <- trainControl(method="repeatedcv", 
+                             number=10, 
+                             repeats=3, classProbs=TRUE)
+
+stack.glm <- caretStack(models, method="rf", metric="Accuracy", trControl=stackControl)
+print(stack.glm)
+
+
+#Apply model into test dataset
+pred_final <- predict(stack.glm, titanic.test)
+PassengerId <- titanic.test$PassengerId
+output.df <- as.data.frame(PassengerId)
+output.df$Survived <- pred_final
+
+write.csv(output.df, file = "kaggle_submission_ver12.csv", row.names = FALSE)
